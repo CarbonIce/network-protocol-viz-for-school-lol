@@ -2,7 +2,7 @@
 # TODO: Fix the repeated LSP messages
 import pygame
 from pygame.locals import *
-from random import randint
+from random import randint, sample
 import sys
 # SGR color constants
 # rene-d 2018
@@ -45,17 +45,17 @@ class C:
             kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
             del kernel32
 
-RouterGraph = dict() # Adj Dict, the birds eye view of the network that the routers dont get
+# RouterGraph = dict() # Adj Dict, the birds eye view of the network that the routers dont get
 '''
 {
     4 : [(2, "A", "B", 3), (4, "B", "B", 9)]
     Source Router ID : Cost, Source Port, Dest Port, Dest Router
 }
 '''
-RouterIDToObject = dict()
+# RouterIDToObject = dict()
 
-ROUTER_HELLO_INTERVAL = 5
-ROUTER_LSP_INTERVAL = 15
+ROUTER_HELLO_INTERVAL = 10
+ROUTER_LSP_INTERVAL = 1500
 
 MessageTypeToHumanReadable = {
     1 : "HELLO",
@@ -65,16 +65,13 @@ MessageTypeToHumanReadable = {
 # It also doesn't account for travel time, etc.
 def sendMessage(routerFrom, portTo, messageType, data=None):
     # Attempts to send the message to the router connected to the specified port. Returns if it was successful or not.
-    global RouterGraph
-    for x in RouterGraph[routerFrom]:
+    for x in FullNetwork.Connections[routerFrom] :
         if x[1] == portTo:  
-            if messageType == 2:
-                print(f"{C.GREEN}[+] {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} to router {x[3]} (LSP SRC {data.origin} SEQ {data.seqNum}){C.END}")
-            else:
-                print(f"[i] {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} to router {x[3]}")
-            RouterIDToObject[x[3]].recieveMessage(x[2], messageType, data)
+            if messageType == 1:
+                print(f"[i {T}] {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} to router {x[3]}")
+            FullNetwork.getRouter(x[3]).recieveMessage(x[2], messageType, data) # !
             return True
-    print(f"{C.RED}[-] Failed {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} on port {portTo}{C.END}")
+    print(f"{C.RED}[- {T}] Failed {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} on port {portTo}{C.END}")
     return False
             
 class LSP:
@@ -88,15 +85,16 @@ class LSP:
         self.TTL -= 1
 
 class Router:
-    def __init__(self, ID, ports=set()):
+    def __init__(self, ID):
         self.ID = ID
-        self.ActivePorts = ports
+        self.ActivePorts = set()
         self.currentCounter = 0
         self.neighbors = dict() # port : (router ID, Cost)
         self.nodeLSPs = dict() # router ID: (highest SQ num, neighborData)
+        self.adjMatrix = dict()
         self.Active = True
-        self.HelloInterval = 0
-        self.LSPInterval = 0
+        self.HelloInterval = randint(0, 25)
+        self.LSPInterval = randint(0, 250)
         self.nextTickActions = []
         self.IDTextObject = None
         # Generate LSP
@@ -104,12 +102,10 @@ class Router:
     def tick(self):
         self.HelloInterval += 1
         self.LSPInterval += 1
-        if self.HelloInterval > ROUTER_HELLO_INTERVAL:
+        if self.HelloInterval % ROUTER_HELLO_INTERVAL == 0:
             self.getNeigbors()
-            self.HelloInterval = 0
-        if self.LSPInterval > ROUTER_LSP_INTERVAL:
+        if self.LSPInterval % ROUTER_LSP_INTERVAL == 0:
             self.genAndFloodLSP()
-            self.LSPInterval = 0
         for act in self.nextTickActions:
             act(0)
         self.nextTickActions = []
@@ -127,21 +123,20 @@ class Router:
                         kill.add(p)
         if len(kill) > 0:
             for k in kill:
-                print(f"[i] Removing port {k} from router {self.ID}'s active ports")
+                print(f"[! {T}] Removing port {k} from router {self.ID}'s active ports")
                 self.ActivePorts.remove(k)
                 del self.neighbors[k]
 
     def recieveMessage(self, toPort, messageType, data=None):
-        global RouterGraph
         if not self.Active:
             return None
         if messageType == 1: # Hello packet, there would be some like time calculations here normally but lets just say doing this gives the router knowlege of the edge weight
-            if self.neighbors.get(toPort, -1) == -1:
+            if self.neighbors.get(toPort, -1) == -1: # This neighbor has not been considered yet
                 # Find the edge weight and update self.neighbors
-                for adj in RouterGraph[self.ID]:
+                for adj in FullNetwork.Connections[self.ID]:
                     if adj[1] == toPort:
                         self.neighbors[toPort] = (data, adj[0])
-                        self.nextTickActions.append(lambda x: self.genAndFloodLSP()) # TODO: Ensure dupe instructions are not added
+                        self.genAndFloodLSP() # TODO: Ensure dupe instructions are not added
                         break
         elif messageType == 2: # Recieving a LSP.
             SenderID = data.origin
@@ -151,11 +146,17 @@ class Router:
             # print("ttl", LSPTTL)
             if LSPTTL <= 0:
                 if SenderID in self.nodeLSPs and self.nodeLSPs[SenderID][0] == SeqN: # The LSP is stale, remove.
+                    print(f"{C.BLUE}[! {T}] Router {self.ID} recieved and is flooding a 0 TTL LSP message (SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]}){C.END}")
                     del self.nodeLSPs[SenderID]
                     self.floodMessage(2, data, toPort)
                 return None
-            if SenderID not in self.nodeLSPs or self.nodeLSPs[SenderID][0] < SeqN:
+            if SenderID not in self.nodeLSPs or SeqN > self.nodeLSPs[SenderID][0]:
+                print(f"{C.GREEN}[+ {T}] Router {self.ID} accepts LSP with SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]}{C.END}")
                 self.nodeLSPs[SenderID] = (SeqN, NeighborData)
+                for node in self.nodeLSPs:
+                    self.adjMatrix[node] = list(self.nodeLSPs[node][1].values())
+            else:
+                print(f"{C.RED}[- {T}] Router {self.ID} denies LSP with SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]} (More recent or equal LSP of SEQ {self.nodeLSPs[SenderID][0]}){C.END}")
             # Continue to flood the LSP on all ports that are not the one that this router recieved it from
             data.decrementTTL()
             self.nextTickActions.append(lambda x: self.floodMessage(2, data, toPort))
@@ -171,24 +172,54 @@ class Router:
         
         if change:
             for k in kill:
-                print(f"[i] Removing port {k} from router {self.ID}'s active ports")
+                print(f"[i {T}] Declaring port {k} on router {self.ID} down")
                 self.ActivePorts.remove(k)
                 del self.neighbors[k]
             self.genAndFloodLSP()
             # Generate new LSP
     
     def genAndFloodLSP(self):
-        ThisLSP = LSP(self.ID, self.neighbors, self.currentCounter, 255)
+        ThisLSP = LSP(self.ID, self.neighbors, self.currentCounter, 50) # Usually TTL is set to 255
         self.currentCounter += 1
         self.nextTickActions.append(lambda x: self.floodMessage(2, ThisLSP))
     
     def attemptRouting(self):
+        return self.adjMatrix
         Adj = dict()
         for node in self.nodeLSPs:
             Adj[node] = list(self.nodeLSPs[node][1].values())
         return Adj
         # Run Dijikstras
-
+class Network:
+    def __init__(self, RouterCount, ConnectionCount):
+        self.size = RouterCount
+        self.Routers = []
+        self.RouterPositions = []
+        self.Connections = {}
+        searchconnect = set()
+        for x in range(1, RouterCount+1):
+            self.Routers.append(Router(x))
+            self.Routers[-1].IDTextObject = Font.render(str(x), False, (0, 0, 0))
+            self.RouterPositions.append((randint(0, DX - 100), randint(100, DY - 100)))
+            self.Connections[x] = []
+        for _ in range(ConnectionCount):
+            R1, R2 = sample(list(range(1,RouterCount+1)), 2)
+            if (R1, R2) not in searchconnect and (R2, R1) not in searchconnect:
+                searchconnect.add((R1, R2))
+                P1 = chr(len(self.getRouter(R1).ActivePorts) + 65)
+                P2 = chr(len(self.getRouter(R2).ActivePorts) + 65)
+                cost = randint(1, 50)
+                self.Connections[R1].append([cost, P1, P2, R2])
+                self.Connections[R2].append([cost, P2, P1, R1])
+                self.getRouter(R1).connectPort(P1)
+                self.getRouter(R2).connectPort(P2)
+        self.RITTP = {o+1 : (self.getRouterPosition(o+1)[0] - 9,  self.getRouterPosition(o+1)[1] - 22) for o in range(RouterCount)}
+    def getRouter(self, ID):
+        return self.Routers[ID-1]
+    def getRouterPosition(self, ID):
+        return self.RouterPositions[ID-1]
+    def getRITTP(self, ID):
+        return self.RITTP[ID]
 # Simple network:
 # 1 A-----C 2
 # B       B A
@@ -201,6 +232,7 @@ class Router:
 # 2 -> 3 : 5
 # 2 -> 4 : 4
 # The 1 -> 2 connection will go down at T = 10
+'''
 ExR1 = Router(1, set(["A", "B"]))
 ExR2 = Router(2, set(["A", "B", "C"]))
 ExR3 = Router(3, set(["A", "B"]))
@@ -215,28 +247,35 @@ RouterGraph = {
     3 : [(5, "B", "B", 2), (1, "A", "B", 1)],
     4 : [(4, "A", "A", 2)]
 }
+'''
 pygame.init()
 Font = pygame.font.SysFont('Cambria', 30)
-
 TickCount = Font.render("Tick 0", False, (0, 0, 0))
 RouterView = Font.render("Viewing true map", False, (0, 0, 0))
 SelectedRouter = 0
+
 DX = 750
 DY = 750
-DISPLAYSURF = pygame.display.set_mode((DX, DY))
+DISPLAYSURF = pygame.display.set_mode((DX, DY), flags=pygame.SCALED)
 
+'''
 RouterIDToPosition = {
     1 : (DX // 6, DX // 6),
     2 : (4 * DX // 6, DY // 6),
     3 : (DX // 6, 4 * DY // 6),
     4 : (4 * DX // 6, 4 * DY // 6)
 }
-
+RouterIDToPosition = {
+    1 : (randint(150, 600), randint(150, 600)),
+    2 : (randint(150, 600), randint(150, 600)),
+    3 : (randint(150, 600), randint(150, 600)),
+    4 : (randint(150, 600), randint(150, 600))
+}
+'''
 NumKeys = set([K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9])
 
-RITTP = {o : (RouterIDToPosition[o][0] - 9, RouterIDToPosition[o][1] - 22) for o in RouterIDToPosition}
-for r in RouterIDToObject:
-    RouterIDToObject[r].IDTextObject = Font.render(str(r), False, (0, 0, 0))
+# RITTP = {o : (RouterIDToPosition[o][0] - 9, RouterIDToPosition[o][1] - 22) for o in RouterIDToPosition}
+FullNetwork = Network(5, 9)
 
 FramesPerSec = pygame.time.Clock()
 
@@ -258,41 +297,32 @@ while True:
             sys.exit()
         if event.type == pygame.KEYDOWN:
             if event.key == K_SPACE:
-                for R in RouterIDToObject.values():
-                    R.tick()
-                for R in RouterIDToObject.values():
-                    print(R.ID, R.attemptRouting())
-                T += 1
-                if T == 8:
-                    RouterGraph[1].pop(0)
-                    RouterGraph[2].pop(0)
-                    print("THEY JUST HIT THE 1 --> 2 CONNECTION")
-                if T == 11:
-                    RouterGraph[3].append((3, "C", "B", 4))
-                    RouterGraph[4].append((3, "B", "C", 3))
-                    ExR3.connectPort("C")
-                    ExR4.connectPort("B")
-                    print("sir a second connection change has struck (welcome connection 3 -- 4)")
-                print(f"Tick {T}")
+                for _ in range(5):
+                    print(f"Tick {T}")
+                    for R in FullNetwork.Routers:
+                        R.tick()
+                    T += 1
             elif event.key in NumKeys:
-                if event.key - 48 == 0 or event.key - 48 in RouterIDToPosition:
+                if event.key - 48 <= FullNetwork.size:
                     SelectedRouter = event.key - 48
     
-    for node in RouterGraph:
-        for edge in RouterGraph[node]:
+    for node in FullNetwork.Connections:
+        for edge in FullNetwork.Connections[node]:
             if SelectedRouter == 0:
-                pygame.draw.line(DISPLAYSURF, (0, 0, 0), RouterIDToPosition[node], RouterIDToPosition[edge[3]], width=5)
+                pygame.draw.line(DISPLAYSURF, (0, 0, 0), FullNetwork.getRouterPosition(node), FullNetwork.getRouterPosition(edge[3]), width=5)
             else:
-                pygame.draw.line(DISPLAYSURF, (200, 200, 200), RouterIDToPosition[node], RouterIDToPosition[edge[3]], width=5)
+                pygame.draw.line(DISPLAYSURF, (200, 200, 200), FullNetwork.getRouterPosition(node), FullNetwork.getRouterPosition(edge[3]), width=5)
     if SelectedRouter != 0:
-        v = RouterIDToObject[SelectedRouter].attemptRouting()
+        v = FullNetwork.getRouter(SelectedRouter).attemptRouting()
         for routerKey in v:
             for edge in v[routerKey]:
-                pygame.draw.line(DISPLAYSURF, (0, 0, 0), RouterIDToPosition[routerKey], RouterIDToPosition[edge[0]], width=5)
-    for o in RouterIDToPosition:
-        pygame.draw.circle(DISPLAYSURF, (0, 0, 0), RouterIDToPosition[o], 30)
-        pygame.draw.circle(DISPLAYSURF, (255, 255, 255), RouterIDToPosition[o], 25)
-        DISPLAYSURF.blit(RouterIDToObject[o].IDTextObject, RITTP[o])
-
+                pygame.draw.line(DISPLAYSURF, (0, 0, 0), FullNetwork.getRouterPosition(routerKey), FullNetwork.getRouterPosition(edge[0]), width=5)
+    for o in range(1, FullNetwork.size + 1):
+        if o == SelectedRouter: 
+            pygame.draw.circle(DISPLAYSURF, (255, 0, 0), FullNetwork.getRouterPosition(o), 20)
+        else:
+            pygame.draw.circle(DISPLAYSURF, (0, 0, 0), FullNetwork.getRouterPosition(o), 20)
+            pygame.draw.circle(DISPLAYSURF, (255, 255, 255), FullNetwork.getRouterPosition(o), 18)
+        DISPLAYSURF.blit(FullNetwork.getRouter(o).IDTextObject, FullNetwork.getRITTP(o))
     pygame.display.update()
     FramesPerSec.tick(FPS)
