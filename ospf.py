@@ -2,7 +2,7 @@
 # TODO: Fix the repeated LSP messages
 import pygame
 from pygame.locals import *
-from random import randint, sample
+from random import randint, sample, choice
 import sys
 # SGR color constants
 # rene-d 2018
@@ -55,9 +55,10 @@ class C:
 # RouterIDToObject = dict()
 
 ROUTER_HELLO_INTERVAL = 10
-ROUTER_LSP_INTERVAL = 1500
+ROUTER_LSP_INTERVAL = 255
 
 MessageTypeToHumanReadable = {
+    0 : "HELLO-ACK",
     1 : "HELLO",
     2 : "LSP"
 }
@@ -67,8 +68,8 @@ def sendMessage(routerFrom, portTo, messageType, data=None):
     # Attempts to send the message to the router connected to the specified port. Returns if it was successful or not.
     for x in FullNetwork.Connections[routerFrom] :
         if x[1] == portTo:  
-            if messageType == 1:
-                print(f"[i {T}] {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} to router {x[3]}")
+            # if messageType != 2:
+            #     print(f"[i {T}] {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} to router {x[3]}")
             FullNetwork.getRouter(x[3]).recieveMessage(x[2], messageType, data) # !
             return True
     print(f"{C.RED}[- {T}] Failed {MessageTypeToHumanReadable[messageType]} message from router {routerFrom} on port {portTo}{C.END}")
@@ -80,8 +81,11 @@ class LSP:
         self.neighbors = directNeighbors
         self.seqNum = SeqNum
         self.TTL = TTL
+        self.path = []
 
-    def decrementTTL(self):
+    def decrementTTL(self, justSentBy=False):
+        if justSentBy:
+            self.path.append(justSentBy)
         self.TTL -= 1
 
 class Router:
@@ -123,14 +127,17 @@ class Router:
                         kill.add(p)
         if len(kill) > 0:
             for k in kill:
-                print(f"[! {T}] Removing port {k} from router {self.ID}'s active ports")
+                print(f"{C.YELLOW}[! {T}] Removing port {k} from router {self.ID}'s active ports{C.END}")
                 self.ActivePorts.remove(k)
-                del self.neighbors[k]
+                if self.neighbors.get(k, False):
+                    del self.neighbors[k]
+                self.recalculateRouting()
 
     def recieveMessage(self, toPort, messageType, data=None):
         if not self.Active:
             return None
-        if messageType == 1: # Hello packet, there would be some like time calculations here normally but lets just say doing this gives the router knowlege of the edge weight
+        # 0 means "This is an ACK, do not respond with an ACK"
+        if messageType == 1 or 0: # Hello packet, there would be some like time calculations here normally but lets just say doing this gives the router knowlege of the edge weight
             if self.neighbors.get(toPort, -1) == -1: # This neighbor has not been considered yet
                 # Find the edge weight and update self.neighbors
                 for adj in FullNetwork.Connections[self.ID]:
@@ -138,6 +145,12 @@ class Router:
                         self.neighbors[toPort] = (data, adj[0])
                         self.genAndFloodLSP() # TODO: Ensure dupe instructions are not added
                         break
+            if messageType == 1:
+                # print(f"[+ {T}] Router {self.ID} recieves HELLO message")
+                self.nextTickActions.append(lambda x : sendMessage(self.ID,toPort, 0))
+            else:
+                # print(f"[+ {T}] Router {self.ID} recieves HELLO-ACK")
+                pass
         elif messageType == 2: # Recieving a LSP.
             SenderID = data.origin
             NeighborData = data.neighbors
@@ -145,20 +158,22 @@ class Router:
             LSPTTL = data.TTL
             # print("ttl", LSPTTL)
             if LSPTTL <= 0:
+                print(data.path)
                 if SenderID in self.nodeLSPs and self.nodeLSPs[SenderID][0] == SeqN: # The LSP is stale, remove.
                     print(f"{C.BLUE}[! {T}] Router {self.ID} recieved and is flooding a 0 TTL LSP message (SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]}){C.END}")
                     del self.nodeLSPs[SenderID]
-                    self.floodMessage(2, data, toPort)
+                    self.recalculateRouting()
+                    self.nextTickActions.append(lambda x : self.floodMessage(2, data, toPort))
                 return None
             if SenderID not in self.nodeLSPs or SeqN > self.nodeLSPs[SenderID][0]:
-                print(f"{C.GREEN}[+ {T}] Router {self.ID} accepts LSP with SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]}{C.END}")
+                print(f"{C.GREEN}[+ {T}] Router {self.ID} accepts LSP with SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]} TTL {LSPTTL} (Contains {len(NeighborData)} ADJ){C.END}")
                 self.nodeLSPs[SenderID] = (SeqN, NeighborData)
-                for node in self.nodeLSPs:
-                    self.adjMatrix[node] = list(self.nodeLSPs[node][1].values())
+                self.recalculateRouting()
             else:
                 print(f"{C.RED}[- {T}] Router {self.ID} denies LSP with SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]} (More recent or equal LSP of SEQ {self.nodeLSPs[SenderID][0]}){C.END}")
+                return None
             # Continue to flood the LSP on all ports that are not the one that this router recieved it from
-            data.decrementTTL()
+            data.decrementTTL(self.ID)
             self.nextTickActions.append(lambda x: self.floodMessage(2, data, toPort))
     
     def getNeigbors(self):
@@ -172,17 +187,23 @@ class Router:
         
         if change:
             for k in kill:
-                print(f"[i {T}] Declaring port {k} on router {self.ID} down")
+                print(f"{C.YELLOW}[i {T}] Declaring port {k} on router {self.ID} down{C.END}")
                 self.ActivePorts.remove(k)
-                del self.neighbors[k]
+                if self.neighbors.get(k, False):
+                    del self.neighbors[k]
+                self.recalculateRouting()
             self.genAndFloodLSP()
             # Generate new LSP
     
     def genAndFloodLSP(self):
-        ThisLSP = LSP(self.ID, self.neighbors, self.currentCounter, 50) # Usually TTL is set to 255
+        ThisLSP = LSP(self.ID, self.neighbors, self.currentCounter, 255) # Usually TTL is set to 255
         self.currentCounter += 1
         self.nextTickActions.append(lambda x: self.floodMessage(2, ThisLSP))
-    
+    def recalculateRouting(self):
+        self.adjMatrix = {}
+        for LSP in self.nodeLSPs:
+            self.adjMatrix[LSP] = list(self.nodeLSPs[LSP][1].values())
+        
     def attemptRouting(self):
         return self.adjMatrix
         Adj = dict()
@@ -220,6 +241,46 @@ class Network:
         return self.RouterPositions[ID-1]
     def getRITTP(self, ID):
         return self.RITTP[ID]
+    def blowUpRandomConnection(self):
+        randomStartNode = choice(list(self.Connections.keys()))
+        randomEndNode = choice(self.Connections[randomStartNode])
+        self.Connections[randomStartNode].remove(randomEndNode)
+        rev = [randomEndNode[0], randomEndNode[2], randomEndNode[1], randomStartNode]
+        self.Connections[randomEndNode[3]].remove(rev)
+        print(f"{C.YELLOW}[! {T}] Edge from node {randomStartNode} to {randomEndNode[3]} cut{C.END}")
+    def createRandomConnection(self):
+        while True:
+            randomStartNode = choice(list(self.Connections.keys()))
+            randomEndNode = choice(list(set(range(1, self.size+1)).difference({x[0] for x in self.Connections[randomStartNode]})))
+            if randomStartNode == randomEndNode:
+                continue
+            unique = True
+            for conn in self.Connections[randomStartNode]:
+                if conn[3] == randomEndNode:
+                    unique = False
+                    break
+            if not unique:
+                continue
+            randomWeight = randint(1, 50)
+            # print(self.getRouter(randomStartNode).ActivePorts, self.getRouter(randomEndNode).ActivePorts)
+            AP1 = self.getRouter(randomStartNode).ActivePorts
+            AP2 = self.getRouter(randomEndNode).ActivePorts
+            P1 = 65
+            P2 = 65
+            while chr(P1) in AP1:
+                P1 += 1
+            while chr(P2) in AP2:
+                P2 += 1
+            P1 = chr(P1)
+            P2 = chr(P2)
+
+            self.Connections[randomStartNode].append([randomWeight, P1, P2, randomEndNode])
+            self.Connections[randomEndNode].append([randomWeight, P2, P1, randomStartNode])
+            self.getRouter(randomStartNode).connectPort(P1)
+            self.getRouter(randomEndNode).connectPort(P2)
+
+            print(f"{C.YELLOW}[! {T}] Edge from router {randomStartNode} port {P1} to {randomEndNode} port {P2} created with weight {randomWeight}{C.END}")
+            break
 # Simple network:
 # 1 A-----C 2
 # B       B A
@@ -275,7 +336,7 @@ RouterIDToPosition = {
 NumKeys = set([K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9])
 
 # RITTP = {o : (RouterIDToPosition[o][0] - 9, RouterIDToPosition[o][1] - 22) for o in RouterIDToPosition}
-FullNetwork = Network(5, 9)
+FullNetwork = Network(8, 18)
 
 FramesPerSec = pygame.time.Clock()
 
@@ -297,11 +358,13 @@ while True:
             sys.exit()
         if event.type == pygame.KEYDOWN:
             if event.key == K_SPACE:
-                for _ in range(5):
-                    print(f"Tick {T}")
-                    for R in FullNetwork.Routers:
-                        R.tick()
-                    T += 1
+                if randint(1, 100) < 5:
+                    FullNetwork.blowUpRandomConnection()
+                if randint(1, 100) > 95:
+                    FullNetwork.createRandomConnection()
+                for R in FullNetwork.Routers:
+                    R.tick()
+                T += 1
             elif event.key in NumKeys:
                 if event.key - 48 <= FullNetwork.size:
                     SelectedRouter = event.key - 48
@@ -316,7 +379,7 @@ while True:
         v = FullNetwork.getRouter(SelectedRouter).attemptRouting()
         for routerKey in v:
             for edge in v[routerKey]:
-                pygame.draw.line(DISPLAYSURF, (0, 0, 0), FullNetwork.getRouterPosition(routerKey), FullNetwork.getRouterPosition(edge[0]), width=5)
+                pygame.draw.line(DISPLAYSURF, (56, 56, 56), FullNetwork.getRouterPosition(routerKey), FullNetwork.getRouterPosition(edge[0]), width=5)
     for o in range(1, FullNetwork.size + 1):
         if o == SelectedRouter: 
             pygame.draw.circle(DISPLAYSURF, (255, 0, 0), FullNetwork.getRouterPosition(o), 20)
