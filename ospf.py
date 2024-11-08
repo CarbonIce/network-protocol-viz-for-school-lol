@@ -166,7 +166,10 @@ class Router:
         self.Active = True
         self.HelloInterval = randint(1, ROUTER_HELLO_INTERVAL)
         self.LSPInterval = randint(0, ROUTER_LSP_INTERVAL)
-        self.nextTickActions = []
+
+        self.nextTickActions = [] 
+        # Filled with Lambda functions (basically temporary function objects) that just call the relevent function lmao
+        
         self.IDTextObject = None  # The pygame text object diplaying the ID of the router
         # Generate LSP
 
@@ -231,8 +234,7 @@ class Router:
             return None
         # 0 means "This is an ACK, do not respond with an ACK"
         if messageType == 1 or 0:  # Hello packet, there would be some like time calculations here normally but lets just say doing this gives the router knowlege of the edge weight
-            if self.neighbors.get(toPort, -1) == - \
-                    1:  # This neighbor has not been considered yet
+            if self.neighbors.get(toPort, -1) == - 1:  # This neighbor has not been considered yet
                 # Find the edge weight and update self.neighbors
                 for adj in FullNetwork.Connections[self.ID]:
                     if adj[1] == toPort:
@@ -246,6 +248,7 @@ class Router:
                         else:
                             prettyPrint(
                                 f"{C.GREEN}[+ {T}] Router {self.ID} connected to router {self.neighbors[toPort][0]} on port {toPort}{C.END}")
+                    # Return an ACK. Not sure why I made it only ACK on a new connection, but whatever,
                     self.nextTickActions.append(
                         lambda x: sendMessage(self.ID, toPort, 0))
                 else:
@@ -299,7 +302,7 @@ class Router:
                 if VERBOSE:
                     prettyPrint(
                         f"{C.RED}[v- {T}] Router {self.ID} denies LSP with SRC {SenderID} SEQ {SeqN} FWD {self.neighbors.get(toPort, ('UNKNOWN', 0))[0]} (More recent or equal LSP of SEQ {self.nodeLSPs[SenderID][0]}){C.END}")
-                return None
+                return None # Do not flood this LSP
 
             # Continue to flood the LSP on all ports that are not the one that
             # this router recieved it from
