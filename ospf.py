@@ -8,20 +8,22 @@ from random import randint, sample, choice
 import sys
 
 ## CONSTANTS ##
-# The number of ticks between HELLOs for the Router. Routers start with a
-# random offset.
+
+# The number of ticks between HELLOs for the Router. Routers start with a random offset.
 ROUTER_HELLO_INTERVAL = 5
+
 # The number of ticks between auto generated LSPs for the Router.
 ROUTER_LSP_INTERVAL = 25
-# Display verbose console messages (E.G. Denial of LSP, notification on
-# Routers saying Hello, longer LSP accept messages, etc.)
+
+# Display verbose console messages (E.G. Denial of LSP, notification on Routers saying Hello, longer LSP accept messages, etc.)
 VERBOSE = True
-# Display non-critical console messages (E.G. Acceptance of LSP,
-# notification of successful HELLOs, etc.)
+
+# Display non-critical console messages (E.G. Acceptance of LSP, notification of successful HELLOs, etc.)
 DEBUG = True
-# Run the sim automatically without user input. I don't think this one
-# works, actually.
+
+# Run the sim automatically without user input. I don't think this one works, actually.
 AUTO = False
+
 FPS = 15  # Guess.
 DX = 750  # X resolution
 DY = 750  # Y resolutoin
@@ -127,8 +129,6 @@ def sendMessage(routerFrom, portTo, messageType, data=None):
     Returns if it was successful or not.
     '''
 
-    # Loop through every connected port on the router, and check if there is a
-    # connected router.
 
     for x in FullNetwork.Connections[routerFrom]:
         if x[1] == portTo:
@@ -159,8 +159,10 @@ class Router:
         self.currentCounter = 0
         self.neighbors = dict()  # port : (router ID, Cost)
         self.nodeLSPs = dict()  # router ID: (highest SQ num, neighborData)
-        # node : (cost, this routers port, adj router port, adj router ID)
+        
+        # adjMatrix[node] -> node : (cost, this routers port, adj router port, adj router ID)
         self.adjMatrix = dict()
+
         self.Active = True
         self.HelloInterval = randint(1, ROUTER_HELLO_INTERVAL)
         self.LSPInterval = randint(0, ROUTER_LSP_INTERVAL)
