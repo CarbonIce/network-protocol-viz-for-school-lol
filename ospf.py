@@ -13,10 +13,10 @@ import sys
 ROUTER_HELLO_INTERVAL = 5
 
 # The number of ticks between auto generated LSPs for the Router.
-ROUTER_LSP_INTERVAL = 25
+ROUTER_LSP_INTERVAL = 50
 
 # Display verbose console messages (E.G. Denial of LSP, notification on Routers saying Hello, longer LSP accept messages, etc.)
-VERBOSE = True
+VERBOSE = False
 
 # Display non-critical console messages (E.G. Acceptance of LSP, notification of successful HELLOs, etc.)
 DEBUG = True
@@ -27,6 +27,9 @@ AUTO = False
 FPS = 15  # Guess.
 DX = 750  # X resolution
 DY = 750  # Y resolutoin
+
+ROUTERCOUNT = 6
+EDGECOUNT = 12
 
 ## REFERENCE DICTONARIES ##
 MessageTypeToHumanReadable = {
@@ -119,6 +122,9 @@ The tick system is... imperfect, to say the least.
 This sim doesn't account for connection reliability even with a functional connection between routers,
 IRL there need to be more ACKS because a packet or two being dropped shouldn't instantly lead to the conncetion being declared down
 It also doesn't account for travel time of packets
+The routers don't actually calculate fastest paths...
+The methods used to generate a random graph are really scuffed and create topologies that arn't very common in IRL networks
+(i.e. no tree, star, etc.)
 
 '''
 
@@ -148,7 +154,7 @@ class LSP:
         self.seqNum = SeqNum
         self.TTL = TTL
 
-    def decrementTTL(self, justSentBy=False):
+    def decrementTTL(self, b=False):
         self.TTL -= 1
 
 
@@ -268,6 +274,8 @@ class Router:
             SeqN = data.seqNum
             LSPTTL = data.TTL
 
+            # THIS IS NOT HOW THIS SHOULD BE HANDLED!!!
+            
             if LSPTTL <= 0:
                 # The LSP is stale, remove.
                 if SenderID in self.nodeLSPs and self.nodeLSPs[SenderID][0] == SeqN:
@@ -476,7 +484,7 @@ DISPLAYSURF = pygame.display.set_mode((DX, DY), flags=pygame.SCALED)
 
 NumKeys = set([K_0, K_1, K_2, K_3, K_4, K_5, K_6, K_7, K_8, K_9])
 
-FullNetwork = Network(4, 5)
+FullNetwork = Network(ROUTERCOUNT, EDGECOUNT)
 
 FramesPerSec = pygame.time.Clock()
 
@@ -506,11 +514,12 @@ while True:
                 R.tick()
             T += 1
         if event.type == pygame.KEYDOWN:
+            if event.key == K_c:
+                FullNetwork.createRandomConnection()
+            elif event.key == K_b:
+                FullNetwork.blowUpRandomConnection()
+
             if not AUTO and event.key == K_SPACE:
-                if randint(1, 100) < 10:
-                    FullNetwork.blowUpRandomConnection()
-                if randint(1, 100) > 90:
-                    FullNetwork.createRandomConnection()
                 for R in FullNetwork.Routers:
                     R.tick()
                 T += 1
